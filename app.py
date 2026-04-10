@@ -130,7 +130,7 @@ if file_prezzi and file_pv and file_load:
     pv = pv[:T].tolist()
     load = load[:T].tolist()
 
-    dates = pd.date_range(start="2025-01-01", periods=int(T), freq="h1")
+    dates = pd.date_range(start="2025-01-01", periods=int(T), freq="h")
 
     df_all = pd.DataFrame({
         "Datetime": dates,
