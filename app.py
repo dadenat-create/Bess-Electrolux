@@ -3,6 +3,7 @@ import pandas as pd
 import pulp
 import math
 import plotly.graph_objects as go
+import io
 
 st.set_page_config(layout="wide")
 st.title("⚡ Ora Energy BESS Optimizer")
@@ -38,6 +39,18 @@ file_pv = st.file_uploader("Produzione FV", type=["xlsx"])
 file_load = st.file_uploader("Consumi stabilimento", type=["xlsx"])
 
 # =========================
+# EXPORT EXCEL
+# =========================
+def convert_to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_export = df.copy()
+        df_export["Data"] = df_export["Datetime"].dt.date
+        df_export["Ora"] = df_export["Datetime"].dt.hour
+        df_export.to_excel(writer, index=False, sheet_name="BESS")
+    return output.getvalue()
+
+# =========================
 # OTTIMIZZAZIONE
 # =========================
 def optimize(prices, pv, load, dates):
@@ -59,7 +72,7 @@ def optimize(prices, pv, load, dates):
     soc = pulp.LpVariable.dicts("soc", range(T), lowBound=SoC_min, upBound=SoC_max)
 
     # =========================
-    # OBIETTIVO (BESS VALUE)
+    # OBIETTIVO
     # =========================
     model += pulp.lpSum([
 
@@ -68,7 +81,6 @@ def optimize(prices, pv, load, dates):
 
         + oneri*discharge_load[t]
 
-        # costo FV (opportunità o costo reale)
         - c_pv*charge_pv[t]
 
         - c_deg*(discharge_grid[t] + discharge_load[t])
@@ -97,7 +109,7 @@ def optimize(prices, pv, load, dates):
             model += soc[t] == soc[t-1] + eta*(charge_grid[t]+charge_pv[t]) - (discharge_grid[t]+discharge_load[t])/eta
 
     # =========================
-    # VINCOLI GIORNALIERI SoC
+    # VINCOLI GIORNALIERI SOC
     # =========================
     df_index = pd.DataFrame({"Datetime": dates})
     df_index["Data"] = df_index["Datetime"].dt.date
@@ -124,7 +136,6 @@ def optimize(prices, pv, load, dates):
         "SoC": [soc[t].varValue for t in range(T)]
     })
 
-    # PROFITTO BESS
     df["Profitto_BESS"] = (
         df["Prezzo"]*df["Discharge_grid"]
         - df["Prezzo"]*df["Charge_grid"]
@@ -134,7 +145,6 @@ def optimize(prices, pv, load, dates):
     )
 
     return df
-
 
 # =========================
 # RUN
@@ -163,7 +173,6 @@ if file_prezzi and file_pv and file_load:
     daily = df.groupby("Data")["Profitto_BESS"].sum()
     monthly = df.groupby("Mese")["Profitto_BESS"].sum()
 
-    # CICLI (energia scaricata / capacità)
     total_discharge = df["Discharge_grid"].sum() + df["Discharge_load"].sum()
     cycles = total_discharge / C_max if C_max > 0 else 0
 
@@ -174,7 +183,7 @@ if file_prezzi and file_pv and file_load:
     col2.metric("📅 Valore medio giorno (€)", round(daily.mean(),2))
     col3.metric("🔋 Cicli equivalenti", round(cycles,2))
 
-    # Mensile
+    # Grafico mensile
     fig_m = go.Figure()
     fig_m.add_trace(go.Bar(x=monthly.index.astype(str), y=monthly.values))
     fig_m.update_layout(title="Valore mensile BESS")
@@ -193,6 +202,16 @@ if file_prezzi and file_pv and file_load:
     fig_soc = go.Figure()
     fig_soc.add_trace(go.Scatter(y=df_d["SoC"], name="SoC"))
     st.plotly_chart(fig_soc, use_container_width=True)
+
+    # DOWNLOAD EXCEL
+    excel_data = convert_to_excel(df)
+
+    st.download_button(
+        label="📥 Scarica risultati BESS (Excel)",
+        data=excel_data,
+        file_name="bess_results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 else:
     st.info("Carica tutti i file per iniziare")
