@@ -284,4 +284,127 @@ if file_prezzi and file_pv and file_load:
     col2.metric("🔋 FV via BESS → Carico",       f"{tot_dis_load_pv:.0f}",
                 help="FV caricato in BESS, poi scaricato sul carico (autoconsumo ritardato)")
     col3.metric("📤 FV via BESS → Rete",         f"{tot_dis_grid_pv:.0f}",
-                help="FV c
+                help="FV caricato in BESS, poi venduto in rete (time-shifting)")
+    col4.metric("⚡ FV → Rete diretto",           f"{tot_pv_to_grid:.0f}",
+                help="pv_to_grid: FV venduto in rete senza passare per la BESS")
+
+    st.subheader("Flussi Rete (MWh)")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("⚡ Rete → Carico diretto",       f"{tot_grid_to_load:.0f}",
+                help="Carico non coperto da FV né BESS")
+    col2.metric("🔋 Rete via BESS → Carico",      f"{tot_dis_load_grid:.0f}",
+                help="Energia acquistata dalla rete, stoccata in BESS, poi scaricata sul carico")
+    col3.metric("💹 Arbitraggio Rete→BESS→Rete",  f"{tot_dis_grid_grid:.0f}",
+                help="Energia acquistata a prezzo basso, rivenduta a prezzo alto")
+
+    # Torta FV
+    st.subheader("Destinazione energia FV")
+    fig_pv = go.Figure(go.Pie(
+        labels=["FV → Carico diretto", "FV via BESS → Carico",
+                "FV via BESS → Rete", "FV → Rete diretta"],
+        values=[tot_pv_to_load, tot_dis_load_pv, tot_dis_grid_pv, tot_pv_to_grid],
+        hole=0.4,
+        marker_colors=["#16a34a", "#4ade80", "#f59e0b", "#3b82f6"]
+    ))
+    fig_pv.update_layout(title="Come viene utilizzata l'energia FV")
+    st.plotly_chart(fig_pv, use_container_width=True)
+
+    # Torta Rete
+    st.subheader("Utilizzo energia prelevata dalla rete")
+    fig_grid = go.Figure(go.Pie(
+        labels=["Rete → Carico diretto", "Rete via BESS → Carico", "Arbitraggio (Rete→BESS→Rete)"],
+        values=[tot_grid_to_load, tot_dis_load_grid, tot_dis_grid_grid],
+        hole=0.4,
+        marker_colors=["#dc2626", "#f87171", "#7c3aed"]
+    ))
+    fig_grid.update_layout(title="Come viene utilizzata l'energia prelevata dalla rete")
+    st.plotly_chart(fig_grid, use_container_width=True)
+
+    # Grafico mensile flussi
+    st.subheader("Andamento mensile flussi energetici (MWh)")
+    mf = df.groupby("Mese").agg(
+        PV_diretto    =("PV_to_load",         "sum"),
+        PV_bess_load  =("Dis_load_from_PV",   "sum"),
+        PV_bess_grid  =("Dis_grid_from_PV",   "sum"),
+        PV_grid_dir   =("PV_to_grid",         "sum"),
+        Rete_load     =("Grid_to_load",        "sum"),
+        Rete_bess_load=("Dis_load_from_grid",  "sum"),
+        Arbitraggio   =("Dis_grid_from_grid",  "sum"),
+    ).reset_index()
+    mesi = mf["Mese"].astype(str)
+
+    fig_fl = go.Figure()
+    fig_fl.add_trace(go.Bar(name="FV → Carico diretto",      x=mesi, y=mf["PV_diretto"],     marker_color="#16a34a"))
+    fig_fl.add_trace(go.Bar(name="FV via BESS → Carico",     x=mesi, y=mf["PV_bess_load"],   marker_color="#4ade80"))
+    fig_fl.add_trace(go.Bar(name="FV via BESS → Rete",       x=mesi, y=mf["PV_bess_grid"],   marker_color="#f59e0b"))
+    fig_fl.add_trace(go.Bar(name="FV → Rete diretta",        x=mesi, y=mf["PV_grid_dir"],    marker_color="#3b82f6"))
+    fig_fl.add_trace(go.Bar(name="Rete → Carico diretto",    x=mesi, y=mf["Rete_load"],      marker_color="#dc2626"))
+    fig_fl.add_trace(go.Bar(name="Rete via BESS → Carico",   x=mesi, y=mf["Rete_bess_load"], marker_color="#f87171"))
+    fig_fl.add_trace(go.Bar(name="Arbitraggio Rete→BESS→Rete",x=mesi,y=mf["Arbitraggio"],    marker_color="#7c3aed"))
+    fig_fl.update_layout(barmode="stack", yaxis_title="MWh",
+                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    st.plotly_chart(fig_fl, use_container_width=True)
+
+    # =========================================================
+    # DETTAGLIO GIORNALIERO
+    # =========================================================
+    st.header("📅 Dettaglio giornaliero")
+
+    selected_day = st.selectbox("Seleziona giorno", df["Data"].unique())
+    df_d = df[df["Data"] == selected_day]
+    ore  = list(range(len(df_d)))
+
+    # Grafico cariche/scariche + prezzo
+    fig_day = go.Figure()
+    fig_day.add_trace(go.Scatter(x=ore, y=df_d["Prezzo"].values,
+                                 name="Prezzo (€/MWh)", yaxis="y2",
+                                 line=dict(dash="dot", color="#6366f1")))
+    fig_day.add_trace(go.Bar(x=ore, y=df_d["Charge_tot"].values,
+                             name="Carica BESS", marker_color="#22c55e"))
+    fig_day.add_trace(go.Bar(x=ore, y=(-df_d["Discharge_tot"]).values,
+                             name="Scarica BESS", marker_color="#f97316"))
+    fig_day.update_layout(
+        title="BESS: carica/scarica vs prezzo",
+        xaxis_title="Ora", yaxis_title="MW",
+        yaxis2=dict(title="€/MWh", overlaying="y", side="right"),
+        barmode="relative"
+    )
+    st.plotly_chart(fig_day, use_container_width=True)
+
+    # Grafico flussi orari
+    fig_fl_d = go.Figure()
+    fig_fl_d.add_trace(go.Bar(x=ore, y=df_d["PV_to_load"].values,    name="FV → Carico diretto",    marker_color="#16a34a"))
+    fig_fl_d.add_trace(go.Bar(x=ore, y=df_d["Dis_load_from_PV"].values, name="FV via BESS → Carico", marker_color="#4ade80"))
+    fig_fl_d.add_trace(go.Bar(x=ore, y=df_d["Dis_grid_from_PV"].values, name="FV via BESS → Rete",   marker_color="#f59e0b"))
+    fig_fl_d.add_trace(go.Bar(x=ore, y=df_d["PV_to_grid"].values,    name="FV → Rete diretta",       marker_color="#3b82f6"))
+    fig_fl_d.add_trace(go.Bar(x=ore, y=df_d["Grid_to_load"].values,  name="Rete → Carico diretto",   marker_color="#dc2626"))
+    fig_fl_d.add_trace(go.Bar(x=ore, y=df_d["Dis_load_from_grid"].values, name="Rete via BESS → Carico", marker_color="#f87171"))
+    fig_fl_d.add_trace(go.Bar(x=ore, y=df_d["Dis_grid_from_grid"].values, name="Arbitraggio",          marker_color="#7c3aed"))
+    fig_fl_d.update_layout(
+        title="Flussi energetici orari (MW)",
+        xaxis_title="Ora", yaxis_title="MW",
+        barmode="stack"
+    )
+    st.plotly_chart(fig_fl_d, use_container_width=True)
+
+    # SoC
+    fig_soc = go.Figure()
+    fig_soc.add_trace(go.Scatter(x=ore, y=df_d["SoC"].values,
+                                 name="SoC (MWh)", fill="tozeroy",
+                                 line=dict(color="#2563eb")))
+    fig_soc.update_layout(title="State of Charge", xaxis_title="Ora", yaxis_title="MWh")
+    st.plotly_chart(fig_soc, use_container_width=True)
+
+    # =========================================================
+    # DOWNLOAD
+    # =========================================================
+    excel_data = convert_to_excel(df)
+    st.download_button(
+        label="📥 Scarica risultati BESS (Excel)",
+        data=excel_data,
+        file_name="bess_results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+else:
+    st.info("⬆️ Carica i tre file Excel per avviare l'ottimizzazione")
