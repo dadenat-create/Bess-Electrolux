@@ -189,5 +189,3 @@ if file_prezzi and file_pv and file_load:
 
 else:
     st.info("Carica tutti i file per iniziare")
-else:
-    st.info("Carica tutti i file per iniziare")
