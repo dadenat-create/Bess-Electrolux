@@ -39,12 +39,11 @@ file_pv = st.file_uploader("Produzione FV", type=["xlsx"])
 file_load = st.file_uploader("Consumi stabilimento", type=["xlsx"])
 
 # =========================
-# OTTIMIZZAZIONE GIORNALIERA
+# OTTIMIZZAZIONE
 # =========================
-def optimize_day(prices, pv, load):
+def optimize(prices, pv, load):
 
     T = len(prices)
-
     model = pulp.LpProblem("BESS_FV", pulp.LpMaximize)
 
     # Variabili
@@ -62,19 +61,16 @@ def optimize_day(prices, pv, load):
     soc = pulp.LpVariable.dicts("soc", range(T), lowBound=SoC_min, upBound=SoC_max)
 
     # =========================
-    # FUNZIONE OBIETTIVO
+    # OBIETTIVO CORRETTO
     # =========================
     model += pulp.lpSum([
 
-        # FV
         prices[t]*pv_to_grid[t]
         + (prices[t] + oneri - c_pv)*pv_to_load[t]
 
-        # BESS
         + prices[t]*discharge_grid[t]
         + (prices[t] + oneri)*discharge_load[t]
 
-        # Costi
         - prices[t]*charge_grid[t]
         - c_pv*charge_pv[t]
         - (prices[t] + oneri)*grid_to_load[t]
@@ -88,19 +84,19 @@ def optimize_day(prices, pv, load):
     # =========================
     for t in range(T):
 
-        # Bilancio FV
+        # FV balance
         model += pv[t] == pv_to_load[t] + charge_pv[t] + pv_to_grid[t]
 
-        # Load
+        # Load balance
         model += pv_to_load[t] + discharge_load[t] + grid_to_load[t] == load[t]
 
-        # Limiti potenza
+        # Potenze
         model += charge_grid[t] + charge_pv[t] <= P_charge_max
         model += discharge_grid[t] + discharge_load[t] <= P_discharge_max
 
-        # Vincoli rete
+        # Connessione
         model += pv_to_grid[t] + discharge_grid[t] <= 7
-        model += charge_grid[t] <= 9
+        model += charge_grid[t] + grid_to_load[t] <= 9
 
         # SOC
         if t == 0:
@@ -108,13 +104,8 @@ def optimize_day(prices, pv, load):
         else:
             model += soc[t] == soc[t-1] + eta*(charge_grid[t]+charge_pv[t]) - (discharge_grid[t]+discharge_load[t])/eta
 
-    model += soc[T-1] == SoC_0
-
     model.solve(pulp.PULP_CBC_CMD(msg=0))
 
-    # =========================
-    # OUTPUT
-    # =========================
     df = pd.DataFrame({
         "Prezzo": prices,
         "PV": pv,
@@ -160,25 +151,8 @@ if file_prezzi and file_pv and file_load:
 
     dates = pd.date_range(start="2025-01-01", periods=int(T), freq="h")
 
-    df_all = pd.DataFrame({
-        "Datetime": dates,
-        "Prezzo": prices,
-        "PV": pv,
-        "Load": load
-    })
-
-    results = []
-
-    for day, group in df_all.groupby(df_all["Datetime"].dt.date):
-        res = optimize_day(
-            group["Prezzo"].tolist(),
-            group["PV"].tolist(),
-            group["Load"].tolist()
-        )
-        res["Datetime"] = group["Datetime"].values
-        results.append(res)
-
-    df = pd.concat(results)
+    df = optimize(prices, pv, load)
+    df["Datetime"] = dates
 
     df["Data"] = df["Datetime"].dt.date
     df["Mese"] = df["Datetime"].dt.to_period("M")
@@ -193,12 +167,13 @@ if file_prezzi and file_pv and file_load:
     col1.metric("💰 Ricavo totale (€)", round(df["Profitto"].sum(),2))
     col2.metric("📅 Ricavo medio giorno (€)", round(daily.mean(),2))
 
+    # Mensile
     fig_m = go.Figure()
     fig_m.add_trace(go.Bar(x=monthly.index.astype(str), y=monthly.values))
     fig_m.update_layout(title="Ricavi mensili")
     st.plotly_chart(fig_m, use_container_width=True)
 
-    # MESE
+    # Selezione mese
     selected_month = st.selectbox("Seleziona mese", monthly.index.astype(str))
     df_m = df[df["Mese"].astype(str)==selected_month]
 
@@ -208,7 +183,7 @@ if file_prezzi and file_pv and file_load:
     fig_month.add_trace(go.Bar(y=df_m["Discharge_grid"], name="Discharge"))
     st.plotly_chart(fig_month, use_container_width=True)
 
-    # GIORNO
+    # Giorno
     selected_day = st.selectbox("Seleziona giorno", df_m["Data"].unique())
     df_d = df[df["Data"]==selected_day]
 
