@@ -13,7 +13,6 @@ st.title("⚡ Ora Energy BESS Optimizer (BESS Only Value)")
 st.sidebar.header("Parametri BESS")
 
 C_max = st.sidebar.number_input("Capacità (MWh)", value=5.0)
-SoC_0 = st.sidebar.number_input("SoC iniziale", value=2.5)
 SoC_min = st.sidebar.number_input("SoC min", value=0.5)
 SoC_max = st.sidebar.number_input("SoC max", value=4.5)
 
@@ -26,7 +25,6 @@ eta = math.sqrt(eta_rt)
 c_deg = st.sidebar.number_input("Costo degradazione (€/MWh)", value=0.0)
 
 st.sidebar.header("Parametri sistema")
-c_pv = st.sidebar.number_input("Costo FV (€/MWh)", value=72.0)
 oneri = st.sidebar.number_input("Oneri evitati (€/MWh)", value=75.0)
 
 # =========================
@@ -41,7 +39,7 @@ file_load = st.file_uploader("Consumi stabilimento", type=["xlsx"])
 # =========================
 # OTTIMIZZAZIONE
 # =========================
-def optimize(prices, pv, load):
+def optimize(prices, pv, load, dates):
 
     T = len(prices)
     model = pulp.LpProblem("BESS_only", pulp.LpMaximize)
@@ -65,17 +63,13 @@ def optimize(prices, pv, load):
     # =========================
     model += pulp.lpSum([
 
-        # arbitraggio rete
         prices[t]*discharge_grid[t]
         - prices[t]*charge_grid[t]
 
-        # valore autoconsumo
         + oneri*discharge_load[t]
 
-        # costo opportunità FV
         - prices[t]*charge_pv[t]
 
-        # degradazione
         - c_deg*(discharge_grid[t] + discharge_load[t])
 
         for t in range(T)
@@ -86,31 +80,39 @@ def optimize(prices, pv, load):
     # =========================
     for t in range(T):
 
-        # FV balance
         model += pv[t] == pv_to_load[t] + charge_pv[t] + pv_to_grid[t]
 
-        # Load balance
         model += pv_to_load[t] + discharge_load[t] + grid_to_load[t] == load[t]
 
-        # Limiti potenza
         model += charge_grid[t] + charge_pv[t] <= P_charge_max
         model += discharge_grid[t] + discharge_load[t] <= P_discharge_max
 
-        # Limiti connessione
         model += pv_to_grid[t] + discharge_grid[t] <= 7
         model += charge_grid[t] + grid_to_load[t] <= 9
 
-        # SOC
         if t == 0:
-            model += soc[t] == SoC_0 + eta*(charge_grid[t]+charge_pv[t]) - (discharge_grid[t]+discharge_load[t])/eta
+            model += soc[t] == SoC_min + eta*(charge_grid[t]+charge_pv[t]) - (discharge_grid[t]+discharge_load[t])/eta
         else:
             model += soc[t] == soc[t-1] + eta*(charge_grid[t]+charge_pv[t]) - (discharge_grid[t]+discharge_load[t])/eta
 
+    # =========================
+    # VINCOLI SoC GIORNALIERI
+    # =========================
+    df_index = pd.DataFrame({"Datetime": dates})
+    df_index["Data"] = df_index["Datetime"].dt.date
+
+    start_idx = df_index.groupby("Data").head(1).index
+    end_idx = df_index.groupby("Data").tail(1).index
+
+    for t in start_idx:
+        model += soc[t] == SoC_min
+
+    for t in end_idx:
+        model += soc[t] == SoC_min
+
     model.solve(pulp.PULP_CBC_CMD(msg=0))
 
-    # =========================
     # OUTPUT
-    # =========================
     df = pd.DataFrame({
         "Prezzo": prices,
         "PV": pv,
@@ -119,13 +121,9 @@ def optimize(prices, pv, load):
         "Charge_PV": [charge_pv[t].varValue for t in range(T)],
         "Discharge_grid": [discharge_grid[t].varValue for t in range(T)],
         "Discharge_load": [discharge_load[t].varValue for t in range(T)],
-        "PV_to_grid": [pv_to_grid[t].varValue for t in range(T)],
-        "PV_to_load": [pv_to_load[t].varValue for t in range(T)],
-        "Grid_to_load": [grid_to_load[t].varValue for t in range(T)],
         "SoC": [soc[t].varValue for t in range(T)]
     })
 
-    # PROFITTO BESS
     df["Profitto_BESS"] = (
         df["Prezzo"]*df["Discharge_grid"]
         - df["Prezzo"]*df["Charge_grid"]
@@ -154,13 +152,12 @@ if file_prezzi and file_pv and file_load:
 
     dates = pd.date_range(start="2025-01-01", periods=int(T), freq="h")
 
-    df = optimize(prices, pv, load)
+    df = optimize(prices, pv, load, dates)
     df["Datetime"] = dates
 
     df["Data"] = df["Datetime"].dt.date
     df["Mese"] = df["Datetime"].dt.to_period("M")
 
-    # KPI
     daily = df.groupby("Data")["Profitto_BESS"].sum()
     monthly = df.groupby("Mese")["Profitto_BESS"].sum()
 
@@ -170,27 +167,15 @@ if file_prezzi and file_pv and file_load:
     col1.metric("💰 Valore totale BESS (€)", round(df["Profitto_BESS"].sum(),2))
     col2.metric("📅 Valore medio giorno (€)", round(daily.mean(),2))
 
-    # Mensile
     fig_m = go.Figure()
     fig_m.add_trace(go.Bar(x=monthly.index.astype(str), y=monthly.values))
-    fig_m.update_layout(title="Valore mensile BESS")
     st.plotly_chart(fig_m, use_container_width=True)
 
-    # Selezione mese
     selected_month = st.selectbox("Seleziona mese", monthly.index.astype(str))
     df_m = df[df["Mese"].astype(str)==selected_month]
 
-    fig_month = go.Figure()
-    fig_month.add_trace(go.Scatter(y=df_m["Prezzo"], name="Prezzo"))
-    fig_month.add_trace(go.Bar(y=df_m["Charge_grid"], name="Charge"))
-    fig_month.add_trace(go.Bar(y=df_m["Discharge_grid"], name="Discharge"))
-    st.plotly_chart(fig_month, use_container_width=True)
-
-    # Giorno
     selected_day = st.selectbox("Seleziona giorno", df_m["Data"].unique())
     df_d = df[df["Data"]==selected_day]
-
-    st.subheader(f"Giorno {selected_day}")
 
     fig_day = go.Figure()
     fig_day.add_trace(go.Scatter(y=df_d["Prezzo"], name="Prezzo"))
@@ -202,5 +187,7 @@ if file_prezzi and file_pv and file_load:
     fig_soc.add_trace(go.Scatter(y=df_d["SoC"], name="SoC"))
     st.plotly_chart(fig_soc, use_container_width=True)
 
+else:
+    st.info("Carica tutti i file per iniziare")
 else:
     st.info("Carica tutti i file per iniziare")
