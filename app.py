@@ -5,32 +5,32 @@ import math
 import plotly.graph_objects as go
 
 st.set_page_config(layout="wide")
-st.title("⚡ Ora Energy BESS + FV Optimizer")
+st.title("⚡ Ora Energy BESS Optimizer (BESS Only Value)")
 
 # =========================
-# SIDEBAR PARAMETRI
+# PARAMETRI
 # =========================
 st.sidebar.header("Parametri BESS")
 
 C_max = st.sidebar.number_input("Capacità (MWh)", value=5.0)
-SoC_0 = st.sidebar.number_input("SoC iniziale", value=1.0)
+SoC_0 = st.sidebar.number_input("SoC iniziale", value=2.5)
 SoC_min = st.sidebar.number_input("SoC min", value=0.5)
 SoC_max = st.sidebar.number_input("SoC max", value=4.5)
 
 P_charge_max = st.sidebar.number_input("P carica (MW)", value=2.5)
 P_discharge_max = st.sidebar.number_input("P scarica (MW)", value=2.5)
 
-eta_rt = st.sidebar.number_input("Efficienza (%)", value=90.0)/100
+eta_rt = st.sidebar.number_input("Efficienza round-trip (%)", value=90.0)/100
 eta = math.sqrt(eta_rt)
 
-c_deg = st.sidebar.number_input("Costo degradazione", value=0.0)
+c_deg = st.sidebar.number_input("Costo degradazione (€/MWh)", value=0.0)
 
-st.sidebar.header("Parametri economici")
+st.sidebar.header("Parametri sistema")
 c_pv = st.sidebar.number_input("Costo FV (€/MWh)", value=72.0)
-oneri = st.sidebar.number_input("Oneri (€/MWh)", value=75.0)
+oneri = st.sidebar.number_input("Oneri evitati (€/MWh)", value=75.0)
 
 # =========================
-# FILE INPUT
+# INPUT FILE
 # =========================
 st.header("Upload dati")
 
@@ -44,7 +44,7 @@ file_load = st.file_uploader("Consumi stabilimento", type=["xlsx"])
 def optimize(prices, pv, load):
 
     T = len(prices)
-    model = pulp.LpProblem("BESS_FV", pulp.LpMaximize)
+    model = pulp.LpProblem("BESS_only", pulp.LpMaximize)
 
     # Variabili
     charge_grid = pulp.LpVariable.dicts("charge_grid", range(T), lowBound=0)
@@ -61,19 +61,21 @@ def optimize(prices, pv, load):
     soc = pulp.LpVariable.dicts("soc", range(T), lowBound=SoC_min, upBound=SoC_max)
 
     # =========================
-    # OBIETTIVO CORRETTO
+    # OBIETTIVO → SOLO BESS
     # =========================
     model += pulp.lpSum([
 
-        prices[t]*pv_to_grid[t]
-        + (prices[t] + oneri - c_pv)*pv_to_load[t]
-
-        + prices[t]*discharge_grid[t]
-        + (prices[t] + oneri)*discharge_load[t]
-
+        # arbitraggio rete
+        prices[t]*discharge_grid[t]
         - prices[t]*charge_grid[t]
-        - c_pv*charge_pv[t]
-        - (prices[t] + oneri)*grid_to_load[t]
+
+        # valore autoconsumo
+        + oneri*discharge_load[t]
+
+        # costo opportunità FV
+        - prices[t]*charge_pv[t]
+
+        # degradazione
         - c_deg*(discharge_grid[t] + discharge_load[t])
 
         for t in range(T)
@@ -90,11 +92,11 @@ def optimize(prices, pv, load):
         # Load balance
         model += pv_to_load[t] + discharge_load[t] + grid_to_load[t] == load[t]
 
-        # Potenze
+        # Limiti potenza
         model += charge_grid[t] + charge_pv[t] <= P_charge_max
         model += discharge_grid[t] + discharge_load[t] <= P_discharge_max
 
-        # Connessione
+        # Limiti connessione
         model += pv_to_grid[t] + discharge_grid[t] <= 7
         model += charge_grid[t] + grid_to_load[t] <= 9
 
@@ -106,6 +108,9 @@ def optimize(prices, pv, load):
 
     model.solve(pulp.PULP_CBC_CMD(msg=0))
 
+    # =========================
+    # OUTPUT
+    # =========================
     df = pd.DataFrame({
         "Prezzo": prices,
         "PV": pv,
@@ -120,14 +125,12 @@ def optimize(prices, pv, load):
         "SoC": [soc[t].varValue for t in range(T)]
     })
 
-    df["Profitto"] = (
-        df["Prezzo"]*df["PV_to_grid"]
-        + (df["Prezzo"]+oneri - c_pv)*df["PV_to_load"]
-        + df["Prezzo"]*df["Discharge_grid"]
-        + (df["Prezzo"]+oneri)*df["Discharge_load"]
+    # PROFITTO BESS
+    df["Profitto_BESS"] = (
+        df["Prezzo"]*df["Discharge_grid"]
         - df["Prezzo"]*df["Charge_grid"]
-        - c_pv*df["Charge_PV"]
-        - (df["Prezzo"]+oneri)*df["Grid_to_load"]
+        + oneri*df["Discharge_load"]
+        - df["Prezzo"]*df["Charge_PV"]
         - c_deg*(df["Discharge_grid"] + df["Discharge_load"])
     )
 
@@ -158,19 +161,19 @@ if file_prezzi and file_pv and file_load:
     df["Mese"] = df["Datetime"].dt.to_period("M")
 
     # KPI
-    daily = df.groupby("Data")["Profitto"].sum()
-    monthly = df.groupby("Mese")["Profitto"].sum()
+    daily = df.groupby("Data")["Profitto_BESS"].sum()
+    monthly = df.groupby("Mese")["Profitto_BESS"].sum()
 
-    st.header("📊 Dashboard")
+    st.header("📊 Dashboard BESS")
 
     col1, col2 = st.columns(2)
-    col1.metric("💰 Ricavo totale (€)", round(df["Profitto"].sum(),2))
-    col2.metric("📅 Ricavo medio giorno (€)", round(daily.mean(),2))
+    col1.metric("💰 Valore totale BESS (€)", round(df["Profitto_BESS"].sum(),2))
+    col2.metric("📅 Valore medio giorno (€)", round(daily.mean(),2))
 
     # Mensile
     fig_m = go.Figure()
     fig_m.add_trace(go.Bar(x=monthly.index.astype(str), y=monthly.values))
-    fig_m.update_layout(title="Ricavi mensili")
+    fig_m.update_layout(title="Valore mensile BESS")
     st.plotly_chart(fig_m, use_container_width=True)
 
     # Selezione mese
